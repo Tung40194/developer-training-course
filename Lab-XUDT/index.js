@@ -315,39 +315,30 @@ async function transferCells(indexer, cell_deps, cellOutputCapacity, typeScript)
 	console.log("\n");
 }
 
-async function consumeCells(indexer, extensionScriptCodeOutpoint, xudtScriptCodeOutPoint)
+async function consumeCells(indexer, cell_deps, typeScript)
 {
 	// Create a transaction skeleton.
 	let transaction = TransactionSkeleton();
 
 	// Add the cell deps.
 	transaction = addDefaultCellDeps(transaction);
-	let cellDep = {depType: "code", outPoint: extensionScriptCodeOutpoint};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
-	cellDep = {depType: "code", outPoint: xudtScriptCodeOutPoint};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	for (const cellDepOutpoint of cell_deps) {
+		const cellDep = {depType: "code", outPoint: cellDepOutpoint};
+		transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	}
 
-	// Add Alice's token cells to the transaction.
-	const lockScriptHashAlice = computeScriptHash(addressToScript(ALICE_ADDRESS));
-	const typeScript = {
-		codeHash: XUDT_RCE_HASH,
-		hashType: "data1",
-		args: lockScriptHashAlice
-	};
 	const query = {lock: addressToScript(ALICE_ADDRESS), type: typeScript};
 	const collectedCells = new CellCollector(indexer, query);
 	for await (const cell of collectedCells.collect()) {
-		// TODO - change the type script to see how typeScript govern data in the blockchain.
-		// console.log(">>>cell: ", cell)
 		transaction = transaction.update("inputs", (i)=>i.push(cell));
 	}
 
 	// Determine the capacity of the input and output cells.
-	const outputCapacity = transaction.outputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n); //0
+	// capacity of output cells is 0
 	const inputCapacity = transaction.inputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n);
 
 	// Create a change Cell for the remaining CKBytes.
-	const changeCapacity = intToHex(inputCapacity - outputCapacity - TX_FEE);
+	const changeCapacity = intToHex(inputCapacity - TX_FEE);
 	const changeCell = {cellOutput: {capacity: changeCapacity, lock: addressToScript(ALICE_ADDRESS), type: null}, data: "0x"};
 	transaction = transaction.update("outputs", (o)=>o.push(changeCell));
 
@@ -457,10 +448,10 @@ async function main()
 	await transferCells(indexer, cell_deps, xudtCellCapacity, xudtTypeScript);
 	await indexerReady(indexer);
 
-	// // Burn token cells created in the last transaction.
-	// console.log("### consume cells");
-	// await consumeCells(indexer, extensionScriptCodeOutpoint, xudtScriptCodeOutPoint);
-	// await indexerReady(indexer);
+	// Burn token cells created in the last transaction.
+	console.log("[### Alice burns all her xudt tokens");
+	await consumeCells(indexer, cell_deps, xudtTypeScript);
+	await indexerReady(indexer);
 
 	console.log("Exercise completed successfully!");
 }
