@@ -7,7 +7,7 @@ import {initializeConfig} from "@ckb-lumos/config-manager";
 import {addressToScript, TransactionSkeleton} from "@ckb-lumos/helpers";
 import {CellCollector, Indexer} from "@ckb-lumos/ckb-indexer";
 import {addDefaultCellDeps, addDefaultWitnessPlaceholders, collectCapacity, indexerReady, readFileToHexString, readFileToHexStringSync, sendTransaction, signTransaction, waitForTransactionConfirmation} from "../lib/index.js";
-import {ckbytesToShannons, hexToArrayBuffer, hexToInt, intToHex, intToU128LeHexBytes, intToU4LeHexBytes, intToU32LeHexBytes, u128LeHexBytesToInt} from "../lib/util.js";
+import {ckbytesToShannons, hexToArrayBuffer, hexToInt, intToHex, intToU128LeHexBytes, intToU4LeHexBytes, intToU32LeHexBytes, u128LeHexBytesToInt, leHexBytesToInt} from "../lib/util.js";
 import {describeTransaction, initializeLab, validateLab} from "./lab.js";
 import { types } from "util";
 import pkg from '@nervosnetwork/ckb-sdk-utils';
@@ -53,7 +53,7 @@ const XUDT_FLAG = 1; // the XUDT FLAG. 1 means enable extension scripts
 const TOTAL_SUPPLY = 21_000_000n; // total supply hardcap
 
 
-/*Bob deploys 3 code cells:
+/*Alice deploys 3 code cells:
 	- xudt code cell
 	- extension code cell
 	- hardcap cell typeID
@@ -79,7 +79,7 @@ async function deployCode(indexer)
 	const requiredCapacity = typeIDCapacity + xudtrce_capacity + extension_script_capacity + ckbytesToShannons(61n) + TX_FEE;
 
 	// Add input capacity cells.
-	const collectedCells = await collectCapacity(indexer, addressToScript(BOB_ADDRESS), requiredCapacity);
+	const collectedCells = await collectCapacity(indexer, addressToScript(ALICE_ADDRESS), requiredCapacity);
 	transaction = transaction.update("inputs", (i)=>i.concat(collectedCells.inputCells));
 	const firstInput = collectedCells.inputCells[0];
 
@@ -88,11 +88,11 @@ async function deployCode(indexer)
 	const hardCapTypeId = generateTypeIdScript({previousOutput: firstInput.outPoint, since: "0x0"}, "0x0");
 	
 	// Placing outputs
-	const output = {cellOutput: {capacity: intToHex(typeIDCapacity), lock: addressToScript(BOB_ADDRESS), type: hardCapTypeId}, data: intToU4LeHexBytes(TOTAL_SUPPLY)};
+	const output = {cellOutput: {capacity: intToHex(typeIDCapacity), lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId}, data: intToU4LeHexBytes(TOTAL_SUPPLY)};
 	transaction = transaction.update("outputs", (i)=>i.push(output));
-	const output1 = {cellOutput: {capacity: intToHex(xudtrce_capacity), lock: addressToScript(BOB_ADDRESS), type: null}, data: hexString1};
+	const output1 = {cellOutput: {capacity: intToHex(xudtrce_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: hexString1};
 	transaction = transaction.update("outputs", (i)=>i.push(output1));
-	const output2 = {cellOutput: {capacity: intToHex(extension_script_capacity), lock: addressToScript(BOB_ADDRESS), type: null}, data: hexString2};
+	const output2 = {cellOutput: {capacity: intToHex(extension_script_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: hexString2};
 	transaction = transaction.update("outputs", (i)=>i.push(output2));
 
 	// Determine the capacity of all input cells.
@@ -101,7 +101,7 @@ async function deployCode(indexer)
 
 	// Create a change Cell for the remaining CKBytes. Since requiredCapacity has added 61, change cell will be greater than 61ckb
 	const changeCapacity = intToHex(inputCapacity - outputCapacity - TX_FEE);
-	let change = {cellOutput: {capacity: changeCapacity, lock: addressToScript(BOB_ADDRESS), type: null}, data: "0x"};
+	let change = {cellOutput: {capacity: changeCapacity, lock: addressToScript(ALICE_ADDRESS), type: null}, data: "0x"};
 	transaction = transaction.update("outputs", (i)=>i.push(change));
 
 	// Add in the witness placeholders.
@@ -114,7 +114,7 @@ async function deployCode(indexer)
 	// await validateLab(transaction, "deploy");
 
 	// Sign the transaction.
-	const signedTx = signTransaction(transaction, BOB_PRIVATE_KEY);
+	const signedTx = signTransaction(transaction, ALICE_PRIVATE_KEY);
 
 	// Send the transaction to the RPC node.
 	const txid = await sendTransaction(NODE_URL, signedTx);
@@ -127,10 +127,6 @@ async function deployCode(indexer)
 	// Return the out point for the binaries so it can be used in the next transaction.
 	return {
 		cellDeps : [
-			{
-				txHash: txid,
-				index: "0x0"
-			},
 			{
 				txHash: txid,
 				index: "0x1"
@@ -151,11 +147,12 @@ async function calculateSmartcontractInfo(ownerAddress, hardcapTypeId) {
 	// serialize hardcap cell type id to put it in xargs
 	const Script = blockchain.Script;
 	const serializedHardcapTypeID = bytes.hexify(Script.pack(hardcapTypeId));
+	const hardCapTypeIdHash = ckbHash(serializedHardcapTypeID);
 
 	// serializing xudt's script vec
 	const hash_type = "data1";
 	const ScriptVec = molecule.vector(blockchain.Script);
-	const serializedXdata = bytes.hexify(ScriptVec.pack([{codeHash: X_SCRIPT_HASH, hashType: hash_type, args: serializedHardcapTypeID}]));
+	const serializedXdata = bytes.hexify(ScriptVec.pack([{codeHash: X_SCRIPT_HASH, hashType: hash_type, args: hardCapTypeIdHash}]));
 
 	// 0x1 - using extension script
 	const xudtFlag = intToU32LeHexBytes(XUDT_FLAG);
@@ -171,32 +168,45 @@ async function calculateSmartcontractInfo(ownerAddress, hardcapTypeId) {
 	};
 
 	return {
-		cellCapacity: outputCapacity,
-		typeScript: typeScript
+		xudtCellCapacity: outputCapacity,
+		xudtTypeScript: typeScript
 	};
 }
 
-async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript)
+async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript, hardCapTypeId)
 {
 	// Create a transaction skeleton.
 	let transaction = TransactionSkeleton();
 
 	// Add the cell deps.
 	transaction = addDefaultCellDeps(transaction);
-	let cellDep = {depType: "code", outPoint: cell_deps[0]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
-	cellDep = {depType: "code", outPoint: cell_deps[1]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
-	cellDep = {depType: "code", outPoint: cell_deps[2]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	for (const cellDepOutpoint of cell_deps) {
+		const cellDep = {depType: "code", outPoint: cellDepOutpoint};
+		transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	}
 
+	let totalMint = 0;
 	const first4cellsAmmount = [[ALICE_ADDRESS, 100], [ALICE_ADDRESS, 300], [ALICE_ADDRESS, 700], [DANIEL_ADDRESS, 900]];
 	for (const pair of first4cellsAmmount) {
 		const sudtData = intToU128LeHexBytes(pair[1]);
 		const outputx = {cellOutput: {capacity: cellOutputCapacity, lock: addressToScript(pair[0]), type: typeScript}, data: sudtData};
 		transaction = transaction.update("outputs", (o)=>o.push(outputx));
+		totalMint += pair[1];
 	}
-	
+
+	// adding hard capped typeid to the intput
+	let remaningCoin = 0;
+	const query = {lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId};
+	const cellCollect = new CellCollector(indexer, query);
+	for await (const cell of cellCollect.collect()) {
+		remaningCoin = leHexBytesToInt(cell.data);
+		transaction = transaction.update("inputs", (i)=>i.push(cell));
+	}
+
+	// adding the updated hard capped typeid to the outputs
+	const updatedHardcapCell = {cellOutput: {capacity: intToHex(ckbytesToShannons(130n)), lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId}, data: intToU4LeHexBytes(remaningCoin - totalMint)};
+	transaction = transaction.update("outputs", (o)=>o.push(updatedHardcapCell));
+
 	// Determine the capacity from all output Cells.
 	const outputCapacity = transaction.outputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n);
 	
@@ -241,12 +251,10 @@ async function transferCells(indexer, cell_deps, cellOutputCapacity, typeScript)
 
 	// Add the cell deps.
 	transaction = addDefaultCellDeps(transaction);
-	let cellDep = {depType: "code", outPoint: cell_deps[0]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
-	cellDep = {depType: "code", outPoint: cell_deps[1]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
-	cellDep = {depType: "code", outPoint: cell_deps[2]};
-	transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	for (const cellDepOutpoint of cell_deps) {
+		const cellDep = {depType: "code", outPoint: cellDepOutpoint};
+		transaction = transaction.update("cellDeps", (cellDeps)=>cellDeps.push(cellDep));
+	}
 
 	const query = {lock: addressToScript(DANIEL_ADDRESS), type: typeScript};
 	const cellCollection = new CellCollector(indexer, query);
@@ -370,7 +378,7 @@ async function AliceSharesCKB(indexer) {
 	transaction = addDefaultCellDeps(transaction);
 
 	// calculate output typeID cell first
-	let requiredCapacity = ckbytesToShannons(60_000n);
+	let requiredCapacity = ckbytesToShannons(10_000n);
 
 	// Add input capacity cells.
 	const collectedCells = await collectCapacity(indexer, addressToScript(ALICE_ADDRESS), requiredCapacity + ckbytesToShannons(61n) + TX_FEE);
@@ -380,8 +388,8 @@ async function AliceSharesCKB(indexer) {
 	// add output
 	const output = {cellOutput: {capacity: intToHex(ckbytesToShannons(10_000n)), lock: addressToScript(DANIEL_ADDRESS), type: null}, data: "0x"};
 	transaction = transaction.update("outputs", (i)=>i.push(output));
-	const output1 = {cellOutput: {capacity: intToHex(ckbytesToShannons(50_000n)), lock: addressToScript(BOB_ADDRESS), type: null}, data: "0x"};
-	transaction = transaction.update("outputs", (i)=>i.push(output1));
+	// const output1 = {cellOutput: {capacity: intToHex(ckbytesToShannons(50_000n)), lock: addressToScript(BOB_ADDRESS), type: null}, data: "0x"};
+	// transaction = transaction.update("outputs", (i)=>i.push(output1));
 
 	// Determine the capacity of the input and output cells.
 	let outputCapacity = transaction.outputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n); //0
@@ -425,28 +433,28 @@ async function main()
 	await initializeLab(NODE_URL, indexer);
 	await indexerReady(indexer);
 
-	console.log("[### Alice shares CKB");
+	console.log("[### Alice shares Daniel CKB");
 	await AliceSharesCKB(indexer);
 	await indexerReady(indexer);
 
-	console.log("[### Bob deploys data and code cells");
+	console.log("[### Alice deploys data and code cells");
 	const {cellDeps: cell_deps, hardCapTypeId: hardCapTypeId} = await deployCode(indexer);
 	await indexerReady(indexer);
 
 	/* calculate smart contract info
-	 - cellCapacity: each cell with this certain type of tokens will require how many ckb?
-	 - typeScript: those cells attached with this typescript, will belong to a contract
+	 - xudtCellCapacity: each cell with this certain type of tokens will require how many ckb?
+	 - xudtTypeScript: those cells attached with this typescript, will belong to a contract
 	*/
-	const {cellCapacity: cellOutputCapacity, typeScript: typeScript} = await calculateSmartcontractInfo(ALICE_ADDRESS, hardCapTypeId);
+	const {xudtCellCapacity: xudtCellCapacity, xudtTypeScript: xudtTypeScript} = await calculateSmartcontractInfo(ALICE_ADDRESS, hardCapTypeId);
 
 	// Create cells that uses the binary that was just deployed.
 	console.log("[### Alice create cells");
-	await createCells(indexer, cell_deps, cellOutputCapacity, typeScript);
+	await createCells(indexer, cell_deps, xudtCellCapacity, xudtTypeScript, hardCapTypeId);
 	await indexerReady(indexer);
 
 	// Transfer the cells created in the last transaction.
 	console.log("[### transfer cells");
-	await transferCells(indexer, cell_deps, cellOutputCapacity, typeScript);
+	await transferCells(indexer, cell_deps, xudtCellCapacity, xudtTypeScript);
 	await indexerReady(indexer);
 
 	// // Burn token cells created in the last transaction.
