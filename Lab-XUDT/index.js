@@ -71,13 +71,13 @@ const XUDT_FLAG = 1; // the XUDT FLAG. 1 means enable extension scripts
 const TOTAL_SUPPLY = 21_000_000n; // initial remaning amount
 
 
-/*Alice deploys 4 code cells:
+/*Alice created 4 code cells:
+	- remaning amount cell typeID // this doesn't contain binary code, but contain total supply and track the remaning coins
 	- xudt code cell
 	- extension code cell
-	- remaning amount cell typeID
 	- lock script code for remaning amount cell typeId
 */
-async function deployCode(indexer)
+async function deployCelldeps(indexer)
 {
 	// Create a transaction skeleton.
 	let transaction = TransactionSkeleton();
@@ -114,18 +114,15 @@ async function deployCode(indexer)
 		args: "0x"
 	}
 	
-	// Placing typeID aka remaning amount cell
+	// Placing outputs
 	const output = {cellOutput: {capacity: intToHex(typeIDCapacity), lock: remainingAmountCellLock, type: remainingAmountCellTypeId}, data: intToU4LeHexBytes(TOTAL_SUPPLY)};
-	transaction = transaction.update("outputs", (i)=>i.push(output));
-	// Placing xudt rce binary cell
+	transaction = transaction.update("outputs", (i)=>i.push(output));	// Placing typeID aka remaning amount cell
 	const output1 = {cellOutput: {capacity: intToHex(xudtrce_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: xudtRceBin};
-	transaction = transaction.update("outputs", (i)=>i.push(output1));
-	// Placing xudt extension script binary cell
+	transaction = transaction.update("outputs", (i)=>i.push(output1));	// Placing xudt rce binary cell
 	const output2 = {cellOutput: {capacity: intToHex(extension_script_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: extensionScriptBin};
-	transaction = transaction.update("outputs", (i)=>i.push(output2));
-	// Placing remamning_cell lock binary cell
+	transaction = transaction.update("outputs", (i)=>i.push(output2));	// Placing xudt extension script binary cell
 	const output3 = {cellOutput: {capacity: intToHex(remaining_amount_cell_lock_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: remainingAmountCellLockBin};
-	transaction = transaction.update("outputs", (i)=>i.push(output3));
+	transaction = transaction.update("outputs", (i)=>i.push(output3));	// Placing remamning_cell lock binary cell
 
 	// Determine the capacity of all input cells.
 	const inputCapacity = transaction.inputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n);
@@ -141,9 +138,6 @@ async function deployCode(indexer)
 
 	// Print the details of the transaction to the console.
 	describeTransaction(transaction.toJS());
-
-	// Validate the transaction against the lab requirements.
-	// await validateLab(transaction, "deploy");
 
 	// Sign the transaction.
 	const signedTx = signTransaction(transaction, ALICE_PRIVATE_KEY);
@@ -178,7 +172,7 @@ async function deployCode(indexer)
 
 async function calculateSmartcontractInfo(ownerAddress, remaningAmountCellTypeId) {
 	// Create a token cells.
-	const lockScriptHashAlice = computeScriptHash(addressToScript(ownerAddress));
+	const lockScriptHash = computeScriptHash(addressToScript(ownerAddress));
 
 	// serialize remaining amount cell type id to put it in xargs
 	const Script = blockchain.Script;
@@ -192,15 +186,9 @@ async function calculateSmartcontractInfo(ownerAddress, remaningAmountCellTypeId
 
 	// 0x1 - using extension script
 	const xudtFlag = intToU32LeHexBytes(XUDT_FLAG);
-	const args = lockScriptHashAlice + xudtFlag.substr(2) + serializedXdata.substr(2);
-	console.log(">>>lockScriptHashAlice: ", lockScriptHashAlice)
-	console.log(">>>xudtFlag: ", xudtFlag)
-	console.log(">>>serializedXdata: ", serializedXdata)
-	console.log(">>>args: ", args)
+	const args = lockScriptHash + xudtFlag.substr(2) + serializedXdata.substr(2);
 	const argsSize = (args.length - 2 ) /2;
-
 	const outputCapacity = intToHex(ckbytesToShannons(8n + 32n + 1n + 20n + 32n + 1n + BigInt(argsSize) + 16n));
-
 	const typeScript = {
 		codeHash: XUDT_RCE_HASH,
 		hashType: "data1",
@@ -275,9 +263,6 @@ async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript, r
 	// Print the details of the transaction to the console.
 	describeTransaction(transaction.toJS());
 
-	// Validate the transaction against the lab requirements.
-	// await validateLab(transaction, "create");
-
 	// Sign the transaction.
 	const signedTx = signTransaction(transaction, ALICE_PRIVATE_KEY);
 
@@ -346,9 +331,6 @@ async function transferCells(indexer, cell_deps, cellOutputCapacity, typeScript)
 	// Print the details of the transaction to the console.
 	describeTransaction(transaction.toJS());
 
-	// Validate the transaction against the lab requirements.
-	// await validateLab(transaction, "transfer");
-
 	// Sign the transaction.
 	const signedTx = signTransaction(transaction, DANIEL_PRIVATE_KEY);
 
@@ -394,9 +376,6 @@ async function consumeCells(indexer, cell_deps, typeScript)
 	// Print the details of the transaction to the console.
 	describeTransaction(transaction.toJS());
 
-	// Validate the transaction against the lab requirements.
-	// await validateLab(transaction, "consume");
-
 	// Sign the transaction.
 	const signedTx = signTransaction(transaction, ALICE_PRIVATE_KEY);
 
@@ -409,7 +388,7 @@ async function consumeCells(indexer, cell_deps, typeScript)
 	console.log("\n");
 }
 
-// Alice transfer Daniel some coins
+// Just a filler function to get Daniel some ckb to do his work next function
 async function AliceSharesCKB(indexer) {
 	let transaction = TransactionSkeleton();
 	transaction = addDefaultCellDeps(transaction);
@@ -443,9 +422,6 @@ async function AliceSharesCKB(indexer) {
 	// Print the details of the transaction to the console.
 	describeTransaction(transaction.toJS());
 
-	// Validate the transaction against the lab requirements.
-	// await validateLab(transaction, "consume");
-
 	// Sign the transaction.
 	const signedTx = signTransaction(transaction, ALICE_PRIVATE_KEY);
 
@@ -475,7 +451,7 @@ async function main()
 	await indexerReady(indexer);
 
 	console.log("[### Alice deploys data and code cells");
-	const {cellDeps: cell_deps, remainingAmountCellTypeId: remainingAmountCellTypeId} = await deployCode(indexer);
+	const {cellDeps: cell_deps, remainingAmountCellTypeId: remainingAmountCellTypeId} = await deployCelldeps(indexer);
 	await indexerReady(indexer);
 
 	/* calculate smart contract info
