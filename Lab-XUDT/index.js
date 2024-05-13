@@ -6,8 +6,28 @@ const {ckbHash, computeScriptHash, generateTypeIdScript} = utils;
 import {initializeConfig} from "@ckb-lumos/config-manager";
 import {addressToScript, TransactionSkeleton} from "@ckb-lumos/helpers";
 import {CellCollector, Indexer} from "@ckb-lumos/ckb-indexer";
-import {addDefaultCellDeps, addDefaultWitnessPlaceholders, collectCapacity, indexerReady, readFileToHexString, readFileToHexStringSync, sendTransaction, signTransaction, waitForTransactionConfirmation} from "../lib/index.js";
-import {ckbytesToShannons, hexToArrayBuffer, hexToInt, intToHex, intToU128LeHexBytes, intToU4LeHexBytes, intToU32LeHexBytes, u128LeHexBytesToInt, leHexBytesToInt} from "../lib/util.js";
+import {
+	addDefaultCellDeps, 
+	addDefaultWitnessPlaceholders, 
+	collectCapacity, 
+	indexerReady, 
+	readFileToHexString, 
+	readFileToHexStringSync, 
+	sendTransaction, 
+	signTransaction, 
+	waitForTransactionConfirmation
+} from "../lib/index.js";
+import {
+	ckbytesToShannons, 
+	hexToArrayBuffer, 
+	hexToInt, 
+	intToHex, 
+	intToU128LeHexBytes, 
+	intToU4LeHexBytes, 
+	intToU32LeHexBytes, 
+	u128LeHexBytesToInt, 
+	leHexBytesToInt
+} from "../lib/util.js";
 import {describeTransaction, initializeLab, validateLab} from "./lab.js";
 import { types } from "util";
 import pkg from '@nervosnetwork/ckb-sdk-utils';
@@ -20,13 +40,6 @@ const CONFIG = JSON.parse(fs.readFileSync("../config.json"));
 // CKB Node and CKB Indexer Node JSON RPC URLs.
 const NODE_URL = "http://127.0.0.1:8114/";
 const INDEXER_URL = "http://127.0.0.1:8114/";
-
-
-/* note on the role of each account
-BOB: deployer of hardcap cell, xudt-rce and extension cells; Token receiver
-Alice: token owner/issuer
-Daniel: token transfer
-*/
 
 // These are the private keys and addresses that will be used in this exercise.
 const ALICE_PRIVATE_KEY = "0x81dabf8f74553c07999e1400a8ecc4abc44ef81c9466e6037bd36e4ad1631c17";
@@ -44,19 +57,25 @@ const XUDT_RCE_HASH = ckbHash(hexToArrayBuffer(readFileToHexStringSync(XUDT_RCE)
 console.log(">>>XUDT_RCE_HASH: ", XUDT_RCE_HASH);
 
 // the binary of extension script
-const X_SCRIPT = "/Users/tung/Work/NERVOS/ckb-production-scripts/build/hard_cap.so";
+const X_SCRIPT = "/Users/tung/Work/NERVOS/ckb-xudt-extension-plugins/build/hard_cap.so";
 const X_SCRIPT_HASH = ckbHash(hexToArrayBuffer(readFileToHexStringSync(X_SCRIPT).hexString));
 console.log(">>>X_SCRIPT_HASH: ", X_SCRIPT_HASH);
 
+// the binary for remaning amount cell typeID lockScript
+const REMAINING_AMOUNT_CELL_LOCK = "/Users/tung/Work/NERVOS/ckb-xudt-extension-plugins/build/ramt_cell_lock";
+const REMANING_AMOUNT_CELL_LOCK_HASH = ckbHash(hexToArrayBuffer(readFileToHexStringSync(REMAINING_AMOUNT_CELL_LOCK).hexString));
+console.log(">>>REMANING_AMOUNT_CELL_LOCK_HASH: ", REMANING_AMOUNT_CELL_LOCK_HASH);
+
 const TX_FEE = 100_000n; // This is the TX fee amount that will be paid in Shannons.
 const XUDT_FLAG = 1; // the XUDT FLAG. 1 means enable extension scripts
-const TOTAL_SUPPLY = 21_000_000n; // total supply hardcap
+const TOTAL_SUPPLY = 21_000_000n; // initial remaning amount
 
 
-/*Alice deploys 3 code cells:
+/*Alice deploys 4 code cells:
 	- xudt code cell
 	- extension code cell
-	- hardcap cell typeID
+	- remaning amount cell typeID
+	- lock script code for remaning amount cell typeId
 */
 async function deployCode(indexer)
 {
@@ -67,33 +86,46 @@ async function deployCode(indexer)
 	transaction = addDefaultCellDeps(transaction);
 
 	// fetch binaries and estimate binary size
-	const {hexString: hexString1, dataSize: dataSize1} = await readFileToHexString(XUDT_RCE);
-	const xudtrce_capacity = ckbytesToShannons(61n) + ckbytesToShannons(dataSize1);
-	const {hexString: hexString2, dataSize: dataSize2} = await readFileToHexString(X_SCRIPT);
-	const extension_script_capacity = ckbytesToShannons(61n) + ckbytesToShannons(dataSize2);
+	const {hexString: xudtRceBin, dataSize: xudtRceBinSize} = await readFileToHexString(XUDT_RCE);
+	const xudtrce_capacity = ckbytesToShannons(61n) + ckbytesToShannons(xudtRceBinSize);
+	const {hexString: extensionScriptBin, dataSize: extensionScriptBinSize} = await readFileToHexString(X_SCRIPT);
+	const extension_script_capacity = ckbytesToShannons(61n) + ckbytesToShannons(extensionScriptBinSize);
+	const {hexString: remainingAmountCellLockBin, dataSize: remainingAmountCellLockBinSize} = await readFileToHexString(REMAINING_AMOUNT_CELL_LOCK);
+	const remaining_amount_cell_lock_capacity = ckbytesToShannons(61n) + ckbytesToShannons(remainingAmountCellLockBinSize);
 
-	// a typeID cell capacity that serves as a hardcap cell
-	const typeIDCapacity = ckbytesToShannons(8n + 32n + 1n + 20n + 32n + 1n + 32n + 4n/*4 bytes to store the hardcap in data field*/);
-
-	// calculate output typeID cell first
-	const requiredCapacity = typeIDCapacity + xudtrce_capacity + extension_script_capacity + ckbytesToShannons(61n) + TX_FEE;
+	// estimate total required capacity to deploy all needed code cells
+	const typeIDCapacity = ckbytesToShannons(8n + 32n + 1n + 20n + 32n + 1n + 32n + 4n/*4 bytes to store the remaning amount in data field*/);
+	const requiredCapacity = typeIDCapacity + xudtrce_capacity + extension_script_capacity 
+		+ remaining_amount_cell_lock_capacity + ckbytesToShannons(61n) + TX_FEE;
 
 	// Add input capacity cells.
 	const collectedCells = await collectCapacity(indexer, addressToScript(ALICE_ADDRESS), requiredCapacity);
 	transaction = transaction.update("inputs", (i)=>i.concat(collectedCells.inputCells));
 	const firstInput = collectedCells.inputCells[0];
 
-	// Creating typeID for the hardcap cell
+	// Generating typeID typeScript for the remaning amount cell
 	// output index of the type id is #0
-	const hardCapTypeId = generateTypeIdScript({previousOutput: firstInput.outPoint, since: "0x0"}, "0x0");
+	const remainingAmountCellTypeId = generateTypeIdScript({previousOutput: firstInput.outPoint, since: "0x0"}, "0x0");
+
+	// Composing lockScript for the remaning amount cell
+	const remainingAmountCellLock = {
+		codeHash: REMANING_AMOUNT_CELL_LOCK_HASH,
+		hashType: "data1",
+		args: "0x"
+	}
 	
-	// Placing outputs
-	const output = {cellOutput: {capacity: intToHex(typeIDCapacity), lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId}, data: intToU4LeHexBytes(TOTAL_SUPPLY)};
+	// Placing typeID aka remaning amount cell
+	const output = {cellOutput: {capacity: intToHex(typeIDCapacity), lock: remainingAmountCellLock, type: remainingAmountCellTypeId}, data: intToU4LeHexBytes(TOTAL_SUPPLY)};
 	transaction = transaction.update("outputs", (i)=>i.push(output));
-	const output1 = {cellOutput: {capacity: intToHex(xudtrce_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: hexString1};
+	// Placing xudt rce binary cell
+	const output1 = {cellOutput: {capacity: intToHex(xudtrce_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: xudtRceBin};
 	transaction = transaction.update("outputs", (i)=>i.push(output1));
-	const output2 = {cellOutput: {capacity: intToHex(extension_script_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: hexString2};
+	// Placing xudt extension script binary cell
+	const output2 = {cellOutput: {capacity: intToHex(extension_script_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: extensionScriptBin};
 	transaction = transaction.update("outputs", (i)=>i.push(output2));
+	// Placing remamning_cell lock binary cell
+	const output3 = {cellOutput: {capacity: intToHex(remaining_amount_cell_lock_capacity), lock: addressToScript(ALICE_ADDRESS), type: null}, data: remainingAmountCellLockBin};
+	transaction = transaction.update("outputs", (i)=>i.push(output3));
 
 	// Determine the capacity of all input cells.
 	const inputCapacity = transaction.inputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n);
@@ -135,31 +167,39 @@ async function deployCode(indexer)
 				txHash: txid,
 				index: "0x2"
 			},
+			{
+				txHash: txid,
+				index: "0x3"
+			},
 		],
-		hardCapTypeId: hardCapTypeId
+		remainingAmountCellTypeId: remainingAmountCellTypeId
 	};
 }
 
-async function calculateSmartcontractInfo(ownerAddress, hardcapTypeId) {
+async function calculateSmartcontractInfo(ownerAddress, remaningAmountCellTypeId) {
 	// Create a token cells.
 	const lockScriptHashAlice = computeScriptHash(addressToScript(ownerAddress));
 
-	// serialize hardcap cell type id to put it in xargs
+	// serialize remaining amount cell type id to put it in xargs
 	const Script = blockchain.Script;
-	const serializedHardcapTypeID = bytes.hexify(Script.pack(hardcapTypeId));
-	const hardCapTypeIdHash = ckbHash(serializedHardcapTypeID);
+	const serializedRemainingAmountCellTypeID = bytes.hexify(Script.pack(remaningAmountCellTypeId));
+	const serializedRemaningAmountCellTypeID = ckbHash(serializedRemainingAmountCellTypeID);
 
 	// serializing xudt's script vec
 	const hash_type = "data1";
 	const ScriptVec = molecule.vector(blockchain.Script);
-	const serializedXdata = bytes.hexify(ScriptVec.pack([{codeHash: X_SCRIPT_HASH, hashType: hash_type, args: hardCapTypeIdHash}]));
+	const serializedXdata = bytes.hexify(ScriptVec.pack([{codeHash: X_SCRIPT_HASH, hashType: hash_type, args: serializedRemaningAmountCellTypeID}]));
 
 	// 0x1 - using extension script
 	const xudtFlag = intToU32LeHexBytes(XUDT_FLAG);
 	const args = lockScriptHashAlice + xudtFlag.substr(2) + serializedXdata.substr(2);
-	const argsSize = args.length;
+	console.log(">>>lockScriptHashAlice: ", lockScriptHashAlice)
+	console.log(">>>xudtFlag: ", xudtFlag)
+	console.log(">>>serializedXdata: ", serializedXdata)
+	console.log(">>>args: ", args)
+	const argsSize = (args.length - 2 ) /2;
 
-	const outputCapacity = intToHex(ckbytesToShannons(8n + 32n + 1n + 20n + 32n + 1n + BigInt(argsSize) + 16n + 4n));
+	const outputCapacity = intToHex(ckbytesToShannons(8n + 32n + 1n + 20n + 32n + 1n + BigInt(argsSize) + 16n));
 
 	const typeScript = {
 		codeHash: XUDT_RCE_HASH,
@@ -173,7 +213,7 @@ async function calculateSmartcontractInfo(ownerAddress, hardcapTypeId) {
 	};
 }
 
-async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript, hardCapTypeId)
+async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript, remainingAmountCellTypeId)
 {
 	// Create a transaction skeleton.
 	let transaction = TransactionSkeleton();
@@ -186,26 +226,32 @@ async function createCells(indexer, cell_deps, cellOutputCapacity, typeScript, h
 	}
 
 	let totalMint = 0;
-	const first4cellsAmmount = [[ALICE_ADDRESS, 100], [ALICE_ADDRESS, 300], [ALICE_ADDRESS, 700], [DANIEL_ADDRESS, 900]];
-	for (const pair of first4cellsAmmount) {
+	const first4cellsAmount = [[ALICE_ADDRESS, 100], [ALICE_ADDRESS, 300], [ALICE_ADDRESS, 700], [DANIEL_ADDRESS, 900]];
+	for (const pair of first4cellsAmount) {
 		const sudtData = intToU128LeHexBytes(pair[1]);
 		const outputx = {cellOutput: {capacity: cellOutputCapacity, lock: addressToScript(pair[0]), type: typeScript}, data: sudtData};
 		transaction = transaction.update("outputs", (o)=>o.push(outputx));
 		totalMint += pair[1];
 	}
 
-	// adding hard capped typeid to the intput
+	// adding remaning amount cell typeid to the intput
 	let remaningCoin = 0;
-	const query = {lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId};
+	const query = {type: remainingAmountCellTypeId};
 	const cellCollect = new CellCollector(indexer, query);
 	for await (const cell of cellCollect.collect()) {
 		remaningCoin = leHexBytesToInt(cell.data);
 		transaction = transaction.update("inputs", (i)=>i.push(cell));
 	}
 
-	// adding the updated hard capped typeid to the outputs
-	const updatedHardcapCell = {cellOutput: {capacity: intToHex(ckbytesToShannons(130n)), lock: addressToScript(ALICE_ADDRESS), type: hardCapTypeId}, data: intToU4LeHexBytes(remaningCoin - totalMint)};
-	transaction = transaction.update("outputs", (o)=>o.push(updatedHardcapCell));
+	// adding the updated remaining amount cell typeid to the outputs
+	// composing lockScript for the remaining amount cell
+	const remainingAmountCellLock = {
+		codeHash: REMANING_AMOUNT_CELL_LOCK_HASH,
+		hashType: "data1",
+		args: "0x"
+	}
+	const updatedRemainingAmountCell = {cellOutput: {capacity: intToHex(ckbytesToShannons(130n)), lock: remainingAmountCellLock, type: remainingAmountCellTypeId}, data: intToU4LeHexBytes(remaningCoin - totalMint)};
+	transaction = transaction.update("outputs", (o)=>o.push(updatedRemainingAmountCell));
 
 	// Determine the capacity from all output Cells.
 	const outputCapacity = transaction.outputs.toArray().reduce((a, c)=>a+hexToInt(c.cellOutput.capacity), 0n);
@@ -429,18 +475,18 @@ async function main()
 	await indexerReady(indexer);
 
 	console.log("[### Alice deploys data and code cells");
-	const {cellDeps: cell_deps, hardCapTypeId: hardCapTypeId} = await deployCode(indexer);
+	const {cellDeps: cell_deps, remainingAmountCellTypeId: remainingAmountCellTypeId} = await deployCode(indexer);
 	await indexerReady(indexer);
 
 	/* calculate smart contract info
 	 - xudtCellCapacity: each cell with this certain type of tokens will require how many ckb?
 	 - xudtTypeScript: those cells attached with this typescript, will belong to a contract
 	*/
-	const {xudtCellCapacity: xudtCellCapacity, xudtTypeScript: xudtTypeScript} = await calculateSmartcontractInfo(ALICE_ADDRESS, hardCapTypeId);
+	const {xudtCellCapacity: xudtCellCapacity, xudtTypeScript: xudtTypeScript} = await calculateSmartcontractInfo(ALICE_ADDRESS, remainingAmountCellTypeId);
 
 	// Create cells that uses the binary that was just deployed.
 	console.log("[### Alice create cells");
-	await createCells(indexer, cell_deps, xudtCellCapacity, xudtTypeScript, hardCapTypeId);
+	await createCells(indexer, cell_deps, xudtCellCapacity, xudtTypeScript, remainingAmountCellTypeId);
 	await indexerReady(indexer);
 
 	// Transfer the cells created in the last transaction.
